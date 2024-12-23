@@ -19,16 +19,74 @@
 
 #define MAX_LINE_LENGTH 1024
 
-#define MIN(X, Y) (((X) < (Y)) ? (X) : (Y))
-#define MAX(X, Y) (((X) > (Y)) ? (X) : (Y))
-
 #define MIN_MAPQ 10
 #define MIN_CLIP_LEN 9
 
-// Define a hash map to store the intervals
+#define MAX_CHROMOSOMES 24
+
+// Define a hash map to store the intervals blacklist regions
 KHASH_MAP_INIT_STR(ranges, int*)
+
 // Define a hashmap for storing the count of clipped reads at each position
-KHASH_MAP_INIT_INT(int, int)  // A simple hash map with int keys (positions) and int values (counts)
+KHASH_MAP_INIT_INT64(uint64_t, int)  // A simple hash map with int keys (positions) and int values (counts)
+
+// Example chromosome names (you can expand this list)
+const char *chromosome_names[MAX_CHROMOSOMES] = {
+    "chr1", "chr2", "chr3", "chr4", "chr5", "chr6", "chr7", "chr8",
+    "chr9", "chr10", "chr11", "chr12", "chr13", "chr14", "chr15", 
+    "chr16", "chr17", "chr18", "chr19", "chr20", "chr21", "chr22", 
+    "chrX", "chrY"
+};
+
+// Function to get a chromosome ID based on the name
+int get_chromosome_id(const char *chromosome) {
+	int i;
+    for (i = 0; i < MAX_CHROMOSOMES; i++) {
+        if (strcmp(chromosome_names[i], chromosome) == 0) {
+            return i;  // Return the index as the unique ID
+        }
+    }
+    return -1;  // Return -1 if chromosome is not found
+}
+
+// Function to encode chromosome and position into a unique integer key
+uint64_t encode_position(int chromosome_id, int position) {
+    // Assuming that chromosome_id can fit in 32 bits and position in 32 bits
+    return ((uint64_t)chromosome_id << 32) | (position & 0xFFFFFFFF);
+}
+
+// Function to decode the unique integer key back into chromosome ID and position
+void decode_position(uint64_t key, int *chromosome_id, int *position) {
+    *chromosome_id = key >> 32;
+    *position = (int)(key & 0xFFFFFFFF);  // Lower 32 bits are the position
+}
+
+//// Function to update the position in the hash map
+//void update_position(khash_t(pos) *hash, const char *chromosome, int pos, int start_count, int end_count) {
+//    // Get the chromosome ID
+//    int chromosome_id = get_chromosome_id(const char *chrom= sam_hdr_tid2name(header, read->core.tid););
+//    if (chromosome_id == -1) {
+//        fprintf(stderr, "Error: Chromosome not found!\n");
+//        return;
+//    }
+//
+//    // Encode the chromosome and position into a unique integer key
+//    uint64_t key = encode_position(chromosome_id, pos);
+//
+//    // Insert or update the hash map
+//    khint_t k = kh_get(pos, hash, key);
+//    if (k == kh_end(hash)) {
+//        // Position not found, create a new entry
+//        k = kh_put(pos, hash, key, &found);
+//        kh_value(hash, k) = start_count + end_count;  // Initialize with counts
+//    } else {
+//        // Update existing position
+//        kh_value(hash, k) += start_count + end_count;
+//    }
+//}
+
+
+
 
 // Define a structure for storing RepeatMasker regions (e.g., Alu, SVA, L1)
 typedef struct {
@@ -40,6 +98,7 @@ typedef struct {
 
 // Structure to store position and its corresponding start and end clipped counts
 typedef struct {
+	char *chromosome;  // Chromosome name (not used directly in hash map)
     int pos;
     int start_count;
     int end_count;
@@ -183,10 +242,14 @@ void load_regions(const char *filename, khash_t(ranges) *region_map) {
 }
 
 
-void process_cigar(bam1_t *b, char *seq, int *clip_side, khash_t(int) *start_clipped_map, khash_t(int) *end_clipped_map) {
+void process_cigar(bam1_t *b, char *seq, bam_hdr_t *header, int *clip_side, khash_t(uint64_t) *start_clipped_map, khash_t(uint64_t) *end_clipped_map) {
     uint32_t *cigar = bam_get_cigar(b);  // Get CIGAR operations for this read
     int seq_len = b->core.l_qseq;  // Length of the read sequence
     int b_pos = b->core.pos;
+	const char *chrom= sam_hdr_tid2name(header, b->core.tid);
+    int chromosome_id = get_chromosome_id(chrom);
+	if (chromosome_id == -1) { return; };
+
     *clip_side = 0;  // Initialize to no clipping
 
     int pos = 0;  // Position in the sequence
@@ -196,12 +259,13 @@ void process_cigar(bam1_t *b, char *seq, int *clip_side, khash_t(int) *start_cli
     if ((cigar[0] & BAM_CIGAR_MASK) == BAM_CSOFT_CLIP) {
         *clip_side |= 1;  // Mark left-side soft clip
 
+		uint64_t key = encode_position(chromosome_id, b_pos);
 
 		// Check if start_pos already exists, otherwise add it to the hash map
         int ret;
-        khiter_t k = kh_get(int, start_clipped_map, pos);
+        khiter_t k = kh_get(uint64_t, start_clipped_map, key);
         if (k == kh_end(start_clipped_map)) {  // Position doesn't exist yet
-            k = kh_put(int, start_clipped_map, pos, &ret);
+            k = kh_put(uint64_t, start_clipped_map, key, &ret);
             kh_value(start_clipped_map, k) = 1;
         } else {
             kh_value(start_clipped_map, k)++;
@@ -219,12 +283,12 @@ void process_cigar(bam1_t *b, char *seq, int *clip_side, khash_t(int) *start_cli
         *clip_side |= 2;  // Mark right-side soft clip
 
         int last_matched_position = b_pos + b->core.l_qseq;
-
+		uint64_t key = encode_position(chromosome_id, last_matched_position);
 
 		int ret;
-        khiter_t k = kh_get(int, end_clipped_map, last_matched_position);
+        khiter_t k = kh_get(uint64_t, end_clipped_map, key);
         if (k == kh_end(end_clipped_map)) {  // Position doesn't exist yet
-            k = kh_put(int, end_clipped_map, last_matched_position, &ret);
+            k = kh_put(uint64_t, end_clipped_map, key, &ret);
             kh_value(end_clipped_map, k) = 1;
         } else {
             kh_value(end_clipped_map, k)++;
@@ -242,7 +306,7 @@ void process_cigar(bam1_t *b, char *seq, int *clip_side, khash_t(int) *start_cli
 }
 
 // Function to collect positions and counts from both hash maps into a list
-void collect_positions(khash_t(int) *start_clipped_map, khash_t(int) *end_clipped_map, PositionClipped **positions, int *num_positions) {
+void collect_positions(khash_t(uint64_t) *start_clipped_map, khash_t(uint64_t) *end_clipped_map, PositionClipped **positions, int *num_positions) {
     // Start with the positions from the start_clipped_map
 	khiter_t k;
     for (k = kh_begin(start_clipped_map); k != kh_end(start_clipped_map); ++k) {
@@ -251,7 +315,7 @@ void collect_positions(khash_t(int) *start_clipped_map, khash_t(int) *end_clippe
             int start_count = kh_value(start_clipped_map, k);
 
             // Check if the position is also in the end_clipped_map
-            khiter_t k_end = kh_get(int, end_clipped_map, start_pos);
+            khiter_t k_end = kh_get(uint64_t, end_clipped_map, start_pos);
             int end_count = (k_end != kh_end(end_clipped_map)) ? kh_value(end_clipped_map, k_end) : 0;
 
             // Add the position to the list
@@ -270,7 +334,7 @@ void collect_positions(khash_t(int) *start_clipped_map, khash_t(int) *end_clippe
             int end_count = kh_value(end_clipped_map, k);
 
             // Check if the position is already in the start_clipped_map
-            khiter_t k_start = kh_get(int, start_clipped_map, end_pos);
+            khiter_t k_start = kh_get(uint64_t, start_clipped_map, end_pos);
             if (k_start == kh_end(start_clipped_map)) {
                 // Position exists only in the end_clipped_map
                 (*positions) = realloc(*positions, (*num_positions + 1) * sizeof(PositionClipped));
@@ -290,25 +354,29 @@ int compare_positions(const void *a, const void *b) {
     return pos_a->pos - pos_b->pos;  // Sort by position
 }
 
-// Function to merge positions that are within 50 bp of each other and sum the counts
 void merge_positions(PositionClipped *positions, int *num_positions) {
-    int i = 1;
-    while (i < *num_positions) {
-        if (positions[i].pos - positions[i - 1].pos <= 50) {
+    if (*num_positions <= 1) return;  // If there's 0 or 1 position, no merge is needed.
+
+    int write_index = 1;  // Start from the second position
+	int i;
+    for (i = 1; i < *num_positions; i++) {
+        // Check if current position is within 50 bp of the previous one
+        if (positions[i].pos - positions[write_index - 1].pos <= 50) {
             // Merge counts
-            positions[i - 1].start_count += positions[i].start_count;
-            positions[i - 1].end_count += positions[i].end_count;
-            // Remove the current position
-			int j;
-            for (j = i; j < *num_positions - 1; j++) {
-                positions[j] = positions[j + 1];
-            }
-            (*num_positions)--;  // Decrease the count
+            positions[write_index - 1].start_count += positions[i].start_count;
+            positions[write_index - 1].end_count += positions[i].end_count;
         } else {
-            i++;  // Move to the next position
+            // Move the current position to the next available spot
+            positions[write_index] = positions[i];
+            write_index++;
         }
     }
+
+    // Update the number of positions after merging
+    *num_positions = write_index;
 }
+
+
 
 // Function to print the sorted list of positions with their start and end counts
 void print_sorted_positions(PositionClipped *positions, int num_positions, const char *filename) {
@@ -322,10 +390,13 @@ void print_sorted_positions(PositionClipped *positions, int num_positions, const
     // Print the header line
     fprintf(output_file, "Position\tStart_Clipped\tEnd_Clipped\n");
 
+	int chrom_id, position;
+
 	int i;
     for (i = 0; i < num_positions; i++) {
 		if (positions[i].start_count + positions[i].end_count >= 2) {
-            fprintf(output_file, "%d\t%d\t%d\n", positions[i].pos, positions[i].start_count, positions[i].end_count);
+			decode_position(positions[i].pos,&chrom_id, &position);
+            fprintf(output_file, "%s:%d\t%d\t%d\n",chromosome_names[chrom_id], position, positions[i].start_count, positions[i].end_count);
         }
     }
     fclose(output_file);
@@ -412,8 +483,8 @@ int main(int argc, char **argv)
     int aligned_reads = 0; // track total aligned reads. useful for QC without 2nd pass over full cram.
 
 	// Initialize hash maps for start and end clipped positions
-    khash_t(int) *start_clipped_map = kh_init(int);
-    khash_t(int) *end_clipped_map = kh_init(int);
+    khash_t(uint64_t) *start_clipped_map = kh_init(uint64_t);
+    khash_t(uint64_t) *end_clipped_map = kh_init(uint64_t);
 
     int opt;
     char *fasta = NULL;
@@ -495,7 +566,7 @@ int main(int argc, char **argv)
         int clip_side = 0;  // 1 = left-side soft clip, 2 = right-side soft clip, 3 = both sides
 
  		// Process the read's CIGAR string and extract soft-clipped bases
-        process_cigar(aln, seq, &clip_side, start_clipped_map,end_clipped_map);
+        process_cigar(aln, seq, hdr, &clip_side, start_clipped_map,end_clipped_map);
 
         //// Skip reads with clipping on both sides
         //if (clip_side == 3) {
@@ -525,12 +596,16 @@ int main(int argc, char **argv)
 	// Collect positions and counts from both hash maps
     PositionClipped *positions = NULL;
     int num_positions = 0;
+	fprintf(stderr, "[vorTEx: get_clip_regions] extracted clips and discordants from %d total aligned reads\n", aligned_reads);
+	fprintf(stderr, "[vorTEx: get_clip_regions] collecting positions...");
     collect_positions(start_clipped_map, end_clipped_map, &positions, &num_positions);
 
     // Sort the positions
+	fprintf(stderr, "[vorTEx: get_clip_regions] sorting positions...");
     qsort(positions, num_positions, sizeof(PositionClipped), compare_positions);
 
     // Merge positions that are within 50 bp of each other
+	fprintf(stderr, "[vorTEx: get_clip_regions] merging within 50bp positions...");
     merge_positions(positions, &num_positions);
 
     // Print the sorted list
@@ -542,8 +617,8 @@ int main(int argc, char **argv)
     sam_close(in);
 
     // Clean up hash maps and positions
-    kh_destroy(int, start_clipped_map);
-    kh_destroy(int, end_clipped_map);
+    kh_destroy(uint64_t, start_clipped_map);
+    kh_destroy(uint64_t, end_clipped_map);
     free(positions);
 
     fprintf(stderr, "[vorTEx: get_reads] extracted clips and discordants from %d total aligned reads\n", aligned_reads);
