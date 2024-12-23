@@ -52,13 +52,16 @@ int get_chromosome_id(const char *chromosome) {
 // Function to encode chromosome and position into a unique integer key
 uint64_t encode_position(int chromosome_id, int position) {
     // Assuming that chromosome_id can fit in 32 bits and position in 32 bits
-    return ((uint64_t)chromosome_id << 32) | (position & 0xFFFFFFFF);
+	uint64_t key = ((uint64_t)chromosome_id << 32) | (uint64_t)position;
+	uint64_t chr = (uint64_t)chromosome_id << 32;
+	//printf("encoded: chr:%d\nshifted chr:%llu\npos:%d\nkey:%llu\n",chromosome_id,chr, position,key);
+    return key;
 }
 
 // Function to decode the unique integer key back into chromosome ID and position
 void decode_position(uint64_t key, int *chromosome_id, int *position) {
-    *chromosome_id = key >> 32;
-    *position = (int)(key & 0xFFFFFFFF);  // Lower 32 bits are the position
+    *chromosome_id = (key >> 32);
+    *position = key & 0xFFFFFFFF;  // Lower 32 bits are the position
 }
 
 //// Function to update the position in the hash map
@@ -98,7 +101,7 @@ typedef struct {
 
 // Structure to store position and its corresponding start and end clipped counts
 typedef struct {
-	char *chromosome;  // Chromosome name (not used directly in hash map)
+	int chromosome;  // Chromosome name (not used directly in hash map)
     int pos;
     int start_count;
     int end_count;
@@ -276,14 +279,27 @@ void process_cigar(bam1_t *b, char *seq, bam_hdr_t *header, int *clip_side, khas
         //for (j = 0; j < clip_len; j++) {
         //    seq[pos++] = int_to_base(bam_seqi(bam_get_seq(b), j)); 
         //}
-    }
-
-    // Check if there's a soft clip at the end (right side)
-    if ((cigar[b->core.n_cigar - 1] & BAM_CIGAR_MASK) == BAM_CSOFT_CLIP) {
+    } else if ((cigar[b->core.n_cigar - 1] & BAM_CIGAR_MASK) == BAM_CSOFT_CLIP) {
+		// Check if there's a soft clip at the end (right side)
         *clip_side |= 2;  // Mark right-side soft clip
 
-        int last_matched_position = b_pos + b->core.l_qseq;
-		uint64_t key = encode_position(chromosome_id, last_matched_position);
+		int clip_len = cigar[b->core.n_cigar - 1];
+		int position = b_pos;
+
+		int i;
+		for (i = 0; i < b->core.n_cigar; i++) {
+    	    int operation = cigar[i] & BAM_CIGAR_MASK;  // Get the operation type
+    	    int length = cigar[i] >> BAM_CIGAR_SHIFT;     // Get the length of the operation
+
+    	    // Handle soft-clipping
+    	    if (operation != BAM_CSOFT_CLIP && operation != BAM_CHARD_CLIP && 
+					operation != BAM_CINS) {
+    	        // If it's a match, update the last matched position
+    	        position += length;  // Move the position forward
+    	    } 
+    	}
+
+		uint64_t key = encode_position(chromosome_id, position);
 
 		int ret;
         khiter_t k = kh_get(uint64_t, end_clipped_map, key);
@@ -308,18 +324,22 @@ void process_cigar(bam1_t *b, char *seq, bam_hdr_t *header, int *clip_side, khas
 // Function to collect positions and counts from both hash maps into a list
 void collect_positions(khash_t(uint64_t) *start_clipped_map, khash_t(uint64_t) *end_clipped_map, PositionClipped **positions, int *num_positions) {
     // Start with the positions from the start_clipped_map
+	int chrom_id,start_pos,end_pos;
 	khiter_t k;
     for (k = kh_begin(start_clipped_map); k != kh_end(start_clipped_map); ++k) {
         if (kh_exist(start_clipped_map, k)) {
-            int start_pos = kh_key(start_clipped_map, k);
+			//decode_position(positions[i].pos,&chrom_id, &position);
+			uint64_t key = kh_key(start_clipped_map, k);
+            decode_position(key,&chrom_id,&start_pos);
             int start_count = kh_value(start_clipped_map, k);
 
             // Check if the position is also in the end_clipped_map
-            khiter_t k_end = kh_get(uint64_t, end_clipped_map, start_pos);
+            khiter_t k_end = kh_get(uint64_t, end_clipped_map, key);
             int end_count = (k_end != kh_end(end_clipped_map)) ? kh_value(end_clipped_map, k_end) : 0;
 
             // Add the position to the list
             (*positions) = realloc(*positions, (*num_positions + 1) * sizeof(PositionClipped));
+            (*positions)[*num_positions].chromosome = chrom_id;
             (*positions)[*num_positions].pos = start_pos;
             (*positions)[*num_positions].start_count = start_count;
             (*positions)[*num_positions].end_count = end_count;
@@ -330,14 +350,16 @@ void collect_positions(khash_t(uint64_t) *start_clipped_map, khash_t(uint64_t) *
     // Now check for positions that exist only in the end_clipped_map
     for (k = kh_begin(end_clipped_map); k != kh_end(end_clipped_map); ++k) {
         if (kh_exist(end_clipped_map, k)) {
-            int end_pos = kh_key(end_clipped_map, k);
+			uint64_t key = kh_key(end_clipped_map, k);
+            decode_position(key,&chrom_id,&end_pos);
             int end_count = kh_value(end_clipped_map, k);
 
             // Check if the position is already in the start_clipped_map
-            khiter_t k_start = kh_get(uint64_t, start_clipped_map, end_pos);
+            khiter_t k_start = kh_get(uint64_t, start_clipped_map, key);
             if (k_start == kh_end(start_clipped_map)) {
                 // Position exists only in the end_clipped_map
                 (*positions) = realloc(*positions, (*num_positions + 1) * sizeof(PositionClipped));
+				(*positions)[*num_positions].chromosome = chrom_id;
                 (*positions)[*num_positions].pos = end_pos;
                 (*positions)[*num_positions].start_count = 0;
                 (*positions)[*num_positions].end_count = end_count;
@@ -348,11 +370,20 @@ void collect_positions(khash_t(uint64_t) *start_clipped_map, khash_t(uint64_t) *
 }
 
 // Comparison function for sorting the positions by their position values
-int compare_positions(const void *a, const void *b) {
-    PositionClipped *pos_a = (PositionClipped *)a;
-    PositionClipped *pos_b = (PositionClipped *)b;
-    return pos_a->pos - pos_b->pos;  // Sort by position
+int compare_position_clipped(const void *a, const void *b) {
+    // Cast the pointers to PositionClipped
+    PositionClipped *pos1 = (PositionClipped *)a;
+    PositionClipped *pos2 = (PositionClipped *)b;
+    
+    // First compare chromosome names (lexicographical order)
+    if (pos1->chromosome != pos2->chromosome) {
+        return pos1->chromosome - pos2->chromosome;  // Return the result of chromosome name comparison
+    }
+
+    // If chromosomes are the same, compare positions (numerical order)
+    return pos1->pos  - pos2->pos;
 }
+
 
 void merge_positions(PositionClipped *positions, int *num_positions) {
     if (*num_positions <= 1) return;  // If there's 0 or 1 position, no merge is needed.
@@ -361,7 +392,8 @@ void merge_positions(PositionClipped *positions, int *num_positions) {
 	int i;
     for (i = 1; i < *num_positions; i++) {
         // Check if current position is within 50 bp of the previous one
-        if (positions[i].pos - positions[write_index - 1].pos <= 50) {
+        if (positions[i].pos - positions[write_index - 1].pos <= 100 &&
+				positions[i].chromosome == positions[write_index - 1].chromosome) {
             // Merge counts
             positions[write_index - 1].start_count += positions[i].start_count;
             positions[write_index - 1].end_count += positions[i].end_count;
@@ -390,13 +422,14 @@ void print_sorted_positions(PositionClipped *positions, int num_positions, const
     // Print the header line
     fprintf(output_file, "Position\tStart_Clipped\tEnd_Clipped\n");
 
-	int chrom_id, position;
+	int chrom_id;
+	int position;
 
 	int i;
     for (i = 0; i < num_positions; i++) {
 		if (positions[i].start_count + positions[i].end_count >= 2) {
-			decode_position(positions[i].pos,&chrom_id, &position);
-            fprintf(output_file, "%s:%d\t%d\t%d\n",chromosome_names[chrom_id], position, positions[i].start_count, positions[i].end_count);
+			chrom_id = positions[i].chromosome;
+            fprintf(output_file, "%s:%d\t%d\t%d\n",chromosome_names[chrom_id], positions[i].pos, positions[i].start_count, positions[i].end_count);
         }
     }
     fclose(output_file);
@@ -597,15 +630,15 @@ int main(int argc, char **argv)
     PositionClipped *positions = NULL;
     int num_positions = 0;
 	fprintf(stderr, "[vorTEx: get_clip_regions] extracted clips and discordants from %d total aligned reads\n", aligned_reads);
-	fprintf(stderr, "[vorTEx: get_clip_regions] collecting positions...");
+	fprintf(stderr, "[vorTEx: get_clip_regions] collecting positions...\n");
     collect_positions(start_clipped_map, end_clipped_map, &positions, &num_positions);
 
     // Sort the positions
-	fprintf(stderr, "[vorTEx: get_clip_regions] sorting positions...");
-    qsort(positions, num_positions, sizeof(PositionClipped), compare_positions);
+	fprintf(stderr, "[vorTEx: get_clip_regions] sorting positions...\n");
+    qsort(positions, num_positions, sizeof(PositionClipped), compare_position_clipped);
 
     // Merge positions that are within 50 bp of each other
-	fprintf(stderr, "[vorTEx: get_clip_regions] merging within 50bp positions...");
+	fprintf(stderr, "[vorTEx: get_clip_regions] merging within 50bp positions...\n");
     merge_positions(positions, &num_positions);
 
     // Print the sorted list
