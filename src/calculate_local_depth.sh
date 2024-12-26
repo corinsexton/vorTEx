@@ -29,7 +29,8 @@ echo -e "Position\tStart Clipped Count\tEnd Clipped Count\tAvg Depth (1000bp win
 
 # Function to calculate average depth over a 1000bp window
 calculate_avg_depth() {
-    local pos=$1
+    local chr_pos=$1
+	IFS=':' read -r chr pos <<< "$chr_pos"
     local bam_file=$2
     local temp_depth_file=$3
     
@@ -38,7 +39,7 @@ calculate_avg_depth() {
     local end_pos=$((pos + 500))
 
     # Run samtools depth on the BAM file to get the coverage for the window
-    samtools depth -r "${bam_file}:${start_pos}-${end_pos}" "$bam_file" > "$temp_depth_file"
+    samtools depth -r "${chr}:${start_pos}-${end_pos}" "$bam_file" > "$temp_depth_file"
     
     # Calculate the total depth in the 1000bp window
     local num_positions=1000
@@ -65,12 +66,12 @@ process_tsv_line() {
     fi
 
     # Parse the line into position, start_count, and end_count
-    pos=$(echo "$line" | cut -f1)
+    chr_pos=$(echo "$line" | cut -f1)
     start_count=$(echo "$line" | cut -f2)
     end_count=$(echo "$line" | cut -f3)
     
     # Calculate the average depth for this position
-    avg_depth=$(calculate_avg_depth "$pos" "$bam_file" "$temp_depth_file")
+    avg_depth=$(calculate_avg_depth "$chr_pos" "$bam_file" "$temp_depth_file")
     
     # Write the results to the output file (use `echo` to append to the output file)
     echo -e "$pos\t$start_count\t$end_count\t$avg_depth" >> "$output_file"
@@ -84,7 +85,9 @@ export temp_depth_file
 export output_file
 
 # Read the TSV file and process each line in parallel
-cat "$input_tsv" | parallel --no-notice -j 8 "process_tsv_line {} $bam_file $temp_depth_file $output_file"
+cat "$input_tsv" | xargs -I {} -P 8 sh -c "process_tsv_line {} $bam_file $temp_depth_file $output_file"
+
+#cat "$input_tsv" | parallel --no-notice -j 8 "process_tsv_line {} $bam_file $temp_depth_file $output_file"
 
 # Clean up temporary file
 rm "$temp_depth_file"
