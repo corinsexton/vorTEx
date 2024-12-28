@@ -7,7 +7,7 @@
 #SBATCH --mem 2G
 #SBATCH -c 16 
 #SBATCH -t 00:30:00
-#SBATCH -o slurm-%x.%j.out
+#SBATCH -o slurm_out/slurm-%x.%j.out
 
 
 
@@ -22,6 +22,7 @@ sample_id=HG002_60x
 
 ref=~/data1/SOFTWARE/REFERENCE/hg38_no_alt/GCA_000001405.15_GRCh38_no_alt_analysis_set.fna
 exclude_regions=~/data1/corinne/ref/encode_exclude_regions_ENCFF356LFX.bed
+rmsk=~/data1/corinne/ref/rmsk/all_active_tes.bed
 
 output_dir=${sample_id}
 
@@ -29,15 +30,41 @@ if [ ! -d ${output_dir} ]; then
 	mkdir ${output_dir}
 fi
 #
-## get SV reads https://github.com/arq5x/lumpy-sv/blob/master/src/filter/filter.c
-## ~20 minutes on 16G cram
-#echo "Running lumpy-filter..."
-time get_clip_regions -f ${ref} -e ${exclude_regions} \
-	${bam_file}\
-	${output_dir}/${sample_id}_clip_positions.tsv \
-	16	
+### get SV reads https://github.com/arq5x/lumpy-sv/blob/master/src/filter/filter.c
+### ~10 minutes on 80G cram
+#echo "Getting clipped regions..."
+#time get_clip_regions -f ${ref} -e ${exclude_regions} -r ${rmsk} \
+#	${bam_file}\
+#	${output_dir}/${sample_id}_clip_positions.tsv \
+#	16	
 #echo "finished!"
 #echo
+##
+
+# took ~6 minutes on 80G cram (60x)
+#echo "Calculating local depth..."
+#tail -n +2 ${output_dir}/${sample_id}_clip_positions.tsv | \
+#	bedtools merge -c 4 -o distinct -d 5000 -i - > ${output_dir}/${sample_id}_clip_positions_5kb.bed
+#
+#awk '{print $1"\t"$2"\t"$3"\tid_"NR}' ${output_dir}/${sample_id}_clip_positions_5kb.bed > ${output_dir}/${sample_id}_clip_positions_5kb.tsv
+#paste <(cut -f4 ${output_dir}/${sample_id}_clip_positions_5kb.tsv) <(cut -f4 ${output_dir}/${sample_id}_clip_positions_5kb.bed) > ${sample_id}/${sample_id}_5kb_regions_key.tsv
+#
+#./src/2_calculate_local_depth.sh ${output_dir}/${sample_id}_clip_positions_5kb.tsv \
+#	${bam_file} \
+#	${output_dir}/${sample_id}_local_depth.tsv 16 
+#echo "finished!"
+#echo
+
+
+# remove any calls with < 10% clipped read support based on local depth
+echo "Filtering read based on depth..."
+./src/3_filter_based_on_local_depth.py -l ${output_dir}/${sample_id}_local_depth.tsv \
+	-k ${output_dir}/${sample_id}_5kb_regions_key.tsv  \
+	-c ${output_dir}/${sample_id}_clip_positions.tsv \
+	-o ${output_dir}/${sample_id}_clip_filtered_candidates.tsv
+echo "finished!"
+echo
+
 #
 ### turn clip and disc to fasta
 ### <1 minute
